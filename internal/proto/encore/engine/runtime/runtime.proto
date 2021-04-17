@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+option go_package = "encore.dev/internal/proto/encore/engine/runtime";
+
+package encore.engine.runtime;
+
+service Runtime {
+  rpc RecordTrace (RecordTraceRequest) returns (RecordTraceResponse);
+  rpc Secrets (SecretsRequest) returns (SecretsResponse);
+}
+
+message RecordTraceRequest {
+  bytes trace_id = 1;
+  bytes data = 2;
+}
+
+message RecordTraceResponse {
+}
+
+message SecretsRequest {
+}
+
+message SecretsResponse {
+  map<string, string> secrets = 1;
+}
