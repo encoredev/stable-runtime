@@ -15,7 +15,7 @@ var (
 	procID      string
 )
 
-var traceMeta = metadata.Pairs("version", "3")
+var traceMeta = metadata.Pairs("version", "4")
 
 func RecordTrace(ctx context.Context, traceID [16]byte, data []byte) error {
 	ctx = metadata.NewOutgoingContext(ctx, traceMeta)
