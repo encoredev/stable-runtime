@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"strconv"
-
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
@@ -16,9 +14,8 @@ func ReqBegin(service, api string) {
 	rpcCount.WithLabelValues(service, api).Add(1)
 }
 
-func ReqEnd(service, api string, durSecs float64, code int) {
-	c := strconv.Itoa(code)
-	rpcDuration.WithLabelValues(service, api, c).Observe(durSecs)
+func ReqEnd(service, api string, durSecs float64, code string) {
+	rpcDuration.WithLabelValues(service, api, code).Observe(durSecs)
 }
 
 func UnknownEndpoint(service, api string) {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"encore.dev/beta/errs"
+	"encore.dev/internal/metrics"
 	"encore.dev/runtime/config"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/rs/zerolog"
@@ -254,6 +255,7 @@ func CopyInputs(inputs [][]byte, outputs []interface{}) error {
 }
 
 func beginReq(spanID SpanID, data RequestData) error {
+	metrics.ReqBegin(data.Service, data.Endpoint)
 	req := &Request{
 		Type:     data.Type,
 		SpanID:   spanID,
@@ -353,10 +355,13 @@ func finishReq(outputs [][]byte, err error, httpStatus int) {
 		req.Logger.Info().Dur("duration", dur).Msg("auth handler completed")
 	default:
 		if httpStatus != 0 {
-			req.Logger.Info().Dur("duration", dur).Int("status", httpStatus).Msg("request completed")
+			code := errs.HTTPStatusToCode(httpStatus).String()
+			req.Logger.Info().Dur("duration", dur).Str("code", code).Int("http_code", httpStatus).Msg("request completed")
+			metrics.ReqEnd(req.Service, req.Endpoint, dur.Seconds(), code)
 		} else {
-			code := errs.Code(err)
-			req.Logger.Info().Dur("duration", dur).Str("code", code.String()).Msg("request completed")
+			code := errs.Code(err).String()
+			req.Logger.Info().Dur("duration", dur).Str("code", code).Msg("request completed")
+			metrics.ReqEnd(req.Service, req.Endpoint, dur.Seconds(), code)
 		}
 	}
 	encoreCompleteReq()

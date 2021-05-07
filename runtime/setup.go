@@ -49,8 +49,14 @@ func (srv *Server) handler(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
+
 	endpoint := srv.handlers[ep]
 	if endpoint == nil {
+		svc, api := "unknown", "Unknown"
+		if idx := strings.IndexByte(ep, '.'); idx != -1 {
+			svc, api = ep[:idx], ep[idx+1:]
+		}
+		metrics.UnknownEndpoint(svc, api)
 		http.Error(w, "Endpoint Not Found", http.StatusNotFound)
 		return
 	}
