@@ -2,6 +2,8 @@ package config
 
 import (
 	"net/http"
+
+	"github.com/julienschmidt/httprouter"
 )
 
 type ServerConfig struct {
@@ -19,5 +21,6 @@ type Service struct {
 type Endpoint struct {
 	Name    string
 	Raw     bool
-	Handler func(w http.ResponseWriter, req *http.Request)
+	Path    string
+	Handler func(w http.ResponseWriter, req *http.Request, ps httprouter.Params)
 }

@@ -11,19 +11,19 @@ import (
 
 	"encore.dev/internal/metrics"
 	"encore.dev/runtime/config"
+	"github.com/julienschmidt/httprouter"
 	"github.com/prometheus/common/expfmt"
 	"github.com/rs/zerolog"
 )
 
 type Server struct {
-	logger   zerolog.Logger
-	handlers map[string]*config.Endpoint
+	logger zerolog.Logger
+	router *httprouter.Router
 }
 
 func (srv *Server) handleRPC(service string, endpoint *config.Endpoint) {
-	srv.logger.Info().Str("service", service).Str("endpoint", endpoint.Name).Msg("registered endpoint")
-	key := service + "." + endpoint.Name
-	srv.handlers[key] = endpoint
+	srv.logger.Info().Str("service", service).Str("endpoint", endpoint.Name).Str("path", endpoint.Path).Msg("registered endpoint")
+	srv.router.Handle("POST", endpoint.Path, endpoint.Handler)
 }
 
 func (srv *Server) ListenAndServe() error {
@@ -50,8 +50,8 @@ func (srv *Server) handler(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	endpoint := srv.handlers[ep]
-	if endpoint == nil {
+	h, p, _ := srv.router.Lookup("POST", req.URL.Path)
+	if h == nil {
 		svc, api := "unknown", "Unknown"
 		if idx := strings.IndexByte(ep, '.'); idx != -1 {
 			svc, api = ep[:idx], ep[idx+1:]
@@ -60,7 +60,7 @@ func (srv *Server) handler(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "Endpoint Not Found", http.StatusNotFound)
 		return
 	}
-	endpoint.Handler(w, req)
+	h(w, req, p)
 }
 
 func (srv *Server) scrapeMetrics(w http.ResponseWriter, req *http.Request) {
@@ -84,9 +84,14 @@ func Setup(cfg *config.ServerConfig) *Server {
 	RootLogger = &logger
 	Config = cfg
 
+	r := httprouter.New()
+	r.HandleOPTIONS = false
+	r.RedirectFixedPath = false
+	r.RedirectTrailingSlash = false
+
 	srv := &Server{
-		logger:   logger,
-		handlers: make(map[string]*config.Endpoint),
+		logger: logger,
+		router: r,
 	}
 	for _, svc := range cfg.Services {
 		for _, endpoint := range svc.Endpoints {
