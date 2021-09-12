@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
+	"reflect"
 	"sync/atomic"
 	"time"
 
 	"encore.dev/beta/errs"
 	"encore.dev/internal/metrics"
+	"encore.dev/internal/stack"
 	"encore.dev/runtime/config"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/rs/zerolog"
@@ -74,14 +77,15 @@ type RequestData struct {
 	Inputs          [][]byte
 	UID             UID
 	AuthData        interface{}
+	RequireAuth     bool
 }
 
-func BeginRequest(data RequestData) error {
+func BeginRequest(ctx context.Context, data RequestData) error {
 	spanID, err := genSpanID()
 	if err != nil {
 		return err
 	}
-	return beginReq(spanID, data)
+	return beginReq(ctx, spanID, data)
 }
 
 func FinishRequest(outputs [][]byte, err error) {
@@ -120,6 +124,7 @@ func BeginCall(params CallParams) (*Call, error) {
 		tb.UVarint(uint64(g.goid))
 		tb.UVarint(uint64(params.CallExprIdx))
 		tb.UVarint(uint64(params.EndpointExprIdx))
+		tb.Stack(stack.Build(3))
 		encoreTraceEvent(CallStart, tb.Buf())
 	}
 
@@ -146,8 +151,8 @@ func (c *Call) Finish(err error) {
 	}
 }
 
-func (c *Call) BeginReq(data RequestData) error {
-	return beginReq(c.SpanID, data)
+func (c *Call) BeginReq(ctx context.Context, data RequestData) error {
+	return beginReq(ctx, c.SpanID, data)
 }
 
 func (c *Call) FinishReq(outputs [][]byte, err error) {
@@ -192,15 +197,17 @@ func (ac *AuthCall) Finish(uid UID, err error) {
 				msg = "unknown error"
 			}
 			tb.String(msg)
+			tb.Stack(errs.Stack(err))
 		} else {
 			tb.String("")
+			tb.Stack(stack.Stack{}) // no stack
 		}
 		encoreTraceEvent(AuthEnd, tb.Buf())
 	}
 }
 
-func (ac *AuthCall) BeginReq(data RequestData) error {
-	return beginReq(ac.SpanID, data)
+func (ac *AuthCall) BeginReq(ctx context.Context, data RequestData) error {
+	return beginReq(ctx, ac.SpanID, data)
 }
 
 func (ac *AuthCall) FinishReq(outputs [][]byte, err error) {
@@ -254,8 +261,7 @@ func CopyInputs(inputs [][]byte, outputs []interface{}) error {
 	return nil
 }
 
-func beginReq(spanID SpanID, data RequestData) error {
-	metrics.ReqBegin(data.Service, data.Endpoint)
+func beginReq(ctx context.Context, spanID SpanID, data RequestData) error {
 	req := &Request{
 		Type:     data.Type,
 		SpanID:   spanID,
@@ -273,15 +279,37 @@ func beginReq(spanID SpanID, data RequestData) error {
 		encoreClearReq()
 	}
 
+	// Update request data based on call options, if any
+	if opts, _ := ctx.Value(callOptionsKey).(*CallOptions); opts != nil {
+		if a := opts.Auth; a != nil {
+			if err := checkAuthData(a.UID, a.UserData); err != nil {
+				return err
+			}
+			req.UID = a.UID
+			req.AuthData = a.UserData
+		}
+	}
+
+	if data.RequireAuth && req.UID == "" {
+		return &errs.Error{
+			Code:    errs.Unauthenticated,
+			Message: "endpoint requires auth but none provided",
+			Meta: errs.Metadata{
+				"service":  req.Service,
+				"endpoint": req.Endpoint,
+			},
+		}
+	}
+
 	encoreBeginReq(spanID, req, true /* always trace */)
 
-	ctx := RootLogger.With().
+	logCtx := RootLogger.With().
 		Str("service", req.Service).
 		Str("endpoint", req.Endpoint)
 	if req.UID != "" {
-		ctx = ctx.Str("uid", string(req.UID))
+		logCtx = logCtx.Str("uid", string(req.UID))
 	}
-	req.Logger = ctx.Logger()
+	req.Logger = logCtx.Logger()
 
 	g := encoreGetG()
 	req.Traced = g.op.trace != nil
@@ -336,7 +364,7 @@ func finishReq(outputs [][]byte, err error, httpStatus int) {
 		tb := NewTraceBuf(64)
 		tb.Bytes(req.SpanID[:])
 		if err == nil {
-			tb.Bytes([]byte{0}) // no error
+			tb.Byte(0) // no error
 			tb.UVarint(uint64(len(outputs)))
 			for _, output := range outputs {
 				tb.UVarint(uint64(len(output)))
@@ -345,6 +373,7 @@ func finishReq(outputs [][]byte, err error, httpStatus int) {
 		} else {
 			tb.Bytes([]byte{1})
 			tb.String(err.Error())
+			tb.Stack(errs.Stack(err))
 		}
 		encoreTraceEvent(RequestEnd, tb.Buf())
 	}
@@ -365,4 +394,52 @@ func finishReq(outputs [][]byte, err error, httpStatus int) {
 		}
 	}
 	encoreCompleteReq()
+}
+
+type AuthInfo struct {
+	UID      UID
+	UserData interface{}
+}
+
+type CallOptions struct {
+	Auth *AuthInfo
+}
+
+type ctxKey string
+
+const callOptionsKey ctxKey = "call"
+
+func WithCallOptions(ctx context.Context, opts *CallOptions) context.Context {
+	return context.WithValue(ctx, callOptionsKey, opts)
+}
+
+func GetCallOptions(ctx context.Context) *CallOptions {
+	if opts, _ := ctx.Value(callOptionsKey).(*CallOptions); opts != nil {
+		return opts
+	}
+	return &CallOptions{}
+}
+
+func checkAuthData(uid UID, userData interface{}) error {
+	if Config == nil {
+		return fmt.Errorf("server init not completed")
+	} else if uid == "" && userData != nil {
+		return fmt.Errorf("invalid API call options: empty uid and non-empty auth data")
+	}
+
+	if Config.AuthData != nil {
+		if uid != "" && userData == nil {
+			return fmt.Errorf("invalid API call options: missing auth data")
+		} else if userData != nil {
+			if tt := reflect.TypeOf(userData); tt != Config.AuthData {
+				return fmt.Errorf("invalid API call options: wrong type for auth data (got %s, expected %s)", tt, Config.AuthData)
+			}
+		}
+	} else {
+		if userData != nil {
+			return fmt.Errorf("invalid API call options: non-nil auth data (auth handler specifies no auth data)")
+		}
+	}
+
+	return nil
 }
